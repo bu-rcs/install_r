@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# Exit on any error, and make pipelines fail if any stage fails (not just the
+# last) - so the `... |& tee` build steps abort the script when make/configure
+# fails, instead of being masked by tee's success.
+set -e
+set -o pipefail
+
 
 # Author: Katia
 # Date: March 15, 2023
@@ -16,90 +22,139 @@
 
 
 
-MODULE_DIR="/share/pkg.8/r/$VERSION/"
-INSTALL_DIR="/share/pkg.8/r/$VERSION/install"
-SRC_DIR="/share/pkg.8/r/$VERSION/src"
-BUILD_DIR="/share/pkg.8/r/$VERSION/build"
+# These come from config.sh - fail clearly if it was not sourced first.
+: "${R_PKG_BASE:?R_PKG_BASE is not set - did you 'source config.sh'?}"
+: "${VERSION:?VERSION is not set - did you 'source config.sh'?}"
 
-cd DIST;
+MODULE_DIR="$R_PKG_BASE/$VERSION"
+INSTALL_DIR="$R_PKG_BASE/$VERSION/install"
+SRC_DIR="$R_PKG_BASE/$VERSION/src"
+BUILD_DIR="$R_PKG_BASE/$VERSION/build"
+
+# Directory the R source tarball extracts into (holds the configure script)
+R_SOURCE_DIR="$SRC_DIR/R-$VERSION"
+
+# Confirm the expected version directory layout exists before doing anything.
+# DIST, src, build and install are created when the R version directory is set
+# up; bail out with a clear message if any is missing.
+for d in "$MODULE_DIR" "$MODULE_DIR/DIST" "$SRC_DIR" "$BUILD_DIR" "$INSTALL_DIR"; do
+    if [ ! -d "$d" ]; then
+        echo "ERROR: required directory does not exist: $d" >&2
+        echo "       Set up the R $VERSION version directory (DIST, src, build, install) first." >&2
+        exit 1
+    fi
+done
+
+cd $MODULE_DIR/DIST;
 # Download source from https://cran.r-project.org/
-wget http://cran.r-project.org/src/base/R-4/R-$VERSION.tar.gz
+wget $CRAN_SRC_URL/R-$VERSION.tar.gz
 
 
-# untar the sources
-cd ../src
-tar xzf ../DIST/R-$VERSION.tar.gz
+# untar the sources into the R source directory
+mkdir -p $R_SOURCE_DIR
+tar xzf $MODULE_DIR/DIST/R-$VERSION.tar.gz -C $R_SOURCE_DIR --strip-components=1
 
 # configure
-cd ../build
-module load texlive/2022
-module load gcc/12.2.0
-module load flexiblas/3.3.1
+# (build modules - texlive, gcc, flexiblas - are loaded by config.sh)
+cd $BUILD_DIR
 
-# The following is the original configure step (before April 30, 2024)
-# ../src/R-$VERSION/configure --prefix=$INSTALL_DIR --enable-R-shlib --enable-memory-profiling --enable-R-profiling --with-valgrind-instrumentation=2 |& tee config.out
+# Assemble configure options. Base options come from $R_CONFIGURE_OPTS (config.sh);
+# the install prefix is added here.
+CONFIGURE_OPTS="--prefix=$INSTALL_DIR $R_CONFIGURE_OPTS"
 
-# April 30, 2024: add flexiblas option to allow switching between various blas implementations:
-../src/R-$VERSION/configure --prefix=$INSTALL_DIR --enable-R-shlib --enable-memory-profiling --enable-R-profiling --with-valgrind-instrumentation=2 --with-blas="`pkg-config flexiblas --libs`" --with-lapack |& tee config.out
+# April 30, 2024: add flexiblas option to allow switching between various blas
+# implementations - but only when a flexiblas module is actually loaded.
+if module list 2>&1 | grep -q flexiblas; then
+    echo "flexiblas module detected - building R with flexiblas BLAS/LAPACK support"
+    CONFIGURE_OPTS="$CONFIGURE_OPTS $R_FLEXIBLAS_CONFIGURE_OPTS"
+fi
+
+# eval so the (deferred) pkg-config command substitution in the flexiblas options
+# runs now and its quotes group the BLAS libs into a single argument.
+eval "$R_SOURCE_DIR/configure $CONFIGURE_OPTS" |& tee config.out
 
 
 #build
 make |&tee make.output
 make install |&tee make.install.output
-make check |&tee make.check.output
+# make check runs R's test suite; keep it non-fatal (set -e) since individual
+# test failures don't necessarily mean a broken/unusable R - just review the log.
+make check |&tee make.check.output || echo "WARNING: make check reported failures - review make.check.output"
 
 
 
 # Make a soft link to the man page
-cd ../install
+cd $INSTALL_DIR
 ln -s share/man man
 
 
-# Add some Fortran shared library to make sure R starts without gcc module:
+# Copy gcc runtime shared libraries into R's lib dir so R starts without the gcc
+# module loaded. The library is located via the currently loaded gcc itself
+# (gcc -print-file-name), so it always matches the gcc used to build R - no
+# hard-coded paths or version numbers - and its version symlinks are recreated.
+copy_gcc_runtime_lib() {
+    local query="$1"                 # library to locate, e.g. libgfortran.so
+    local src realfile soname devlink target
+
+    src=$(readlink -f "$(gcc -print-file-name="$query")")
+    if [ ! -f "$src" ]; then
+        echo "WARNING: could not locate $query via gcc - skipping"
+        return 1
+    fi
+
+    realfile=$(basename "$src")
+    cp -f "$src" .
+    echo "Found $query: copied $src"
+
+    # Recreate the soname link, e.g. libgfortran.so.5 -> libgfortran.so.5.0.0
+    soname=$(objdump -p "$src" 2>/dev/null | awk '/SONAME/ {print $2}')
+    if [ -n "$soname" ] && [ "$soname" != "$realfile" ]; then
+        ln -sf "$realfile" "$soname"
+        echo "  linked $soname -> $realfile"
+    fi
+
+    # Recreate the bare .so link, e.g. libgfortran.so -> libgfortran.so.5
+    devlink="${query%%.so*}.so"
+    target="${soname:-$realfile}"
+    if [ "$devlink" != "$realfile" ] && [ "$devlink" != "$target" ]; then
+        ln -sf "$target" "$devlink"
+        echo "  linked $devlink -> $target"
+    fi
+}
+
 cd lib64/R/lib
-cp /share/pkg.7/gcc/12.2.0/install/lib64/libgfortran.so.5.0.0 .
-ln -s libgfortran.so.5.0.0 libgfortran.so.5
-ln -s libgfortran.so.5 libgfortran.so
-
-# For Rcpp package we also need stdc++
-cp /share/pkg.7/gcc/12.2.0/install/lib64/libstdc++.so.6.0.30 .
-ln -s libstdc++.so.6.0.30 libstdc++.so.6
-ln -s libstdc++.so.6.0.30 libstdc++.so
-
-cp /share/pkg.7/gcc/12.2.0/install/lib64/libgcc_s.so .
-cp /share/pkg.7/gcc/12.2.0/install/lib64/libgcc_s.so.1 .
+copy_gcc_runtime_lib libgfortran.so    # Fortran runtime
+copy_gcc_runtime_lib libstdc++.so      # needed by Rcpp and packages that use it
+copy_gcc_runtime_lib libgcc_s.so.1     # gcc low-level support library
 
 
 # Go back to the main install directory
-cd ../../..
+cd $INSTALL_DIR
 
 
-## Edit ldpaths file to point R to the default Java installation, so
-## if Mike updates Java, it does not break rJava package and those that depend on it.
-## Open the following file
-#/share/pkg.8/r/$VERSION/install/lib64/R/etc/ldpaths
-## Make the first line to be:
-#: ${JAVA_HOME=/usr/java/default/jre}
-javaversion=$(readlink /usr/java/latest)
+# Point R at the system default Java using R's supported javareconf tool, which
+# rewrites the Java settings in etc/ldpaths and Makeconf. /usr/java/default is the
+# system-maintained symlink to the current JDK, so if Mike upgrades Java the symlink
+# is re-pointed and R picks up the newer version - without breaking rJava and the
+# packages that depend on it. javareconf preserves the symlink path (it does not
+# resolve it to a versioned path), so nothing here is pinned to a Java version.
+JAVA_HOME="/usr/java/default"
+[ -d "$JAVA_HOME/jre" ] && JAVA_HOME="$JAVA_HOME/jre"   # older JDKs (e.g. 8) nest the runtime under jre/
+export JAVA_HOME
 
-javaversion=${javaversion##*/}
-echo $javaversion
-
-ed -s /share/pkg.8/r/$VERSION/install/lib64/R/etc/ldpaths <<EOF
-1s/$javaversion/default
-w
-q
-EOF
+echo "Configuring R to use system default Java: $JAVA_HOME (currently resolves to $(readlink -f "$JAVA_HOME"))"
+$INSTALL_DIR/bin/R CMD javareconf JAVA_HOME="$JAVA_HOME"
 #--------------------------------------
 
 
 #----------------------------
-# Install R Bioconductor
+# Done
 #----------------------------
-
-# Go back to the build directory (so we could save the output file there )
-cd ../build
-../install/bin/Rscript ../../install_bioconductor.R |&tee install_bioconductor.output
-
-
-
+echo ""
+echo "================================================================"
+echo "R $VERSION built and installed to: $INSTALL_DIR"
+echo ""
+echo "Next steps (run separately, after confirming R works):"
+echo "  - Install BiocManager + tidyverse:"
+echo "      $INSTALL_DIR/bin/Rscript $R_PKG_BASE/install_bioconductor.R |& tee $BUILD_DIR/install_bioconductor.output"
+echo "================================================================"
