@@ -76,8 +76,8 @@ exact command at the end; it is:
 
 The [`test/`](test/) harness runs `install_R.sh` end-to-end in a throwaway sandbox,
 with **no module system** — the toolchain is installed from the OS package manager.
-It is meant to run on a fresh container image: AlmaLinux 8 or Rocky 8 (closest to the
-cluster's alma8) or Ubuntu.
+It is meant to run on a fresh container image: the RHEL family — AlmaLinux or Rocky,
+el8/el9 (el8 is closest to the cluster's alma8) — or Ubuntu.
 
 ### One command
 
@@ -94,12 +94,15 @@ This will, in order:
 4. Run [`install_R.sh`](install_R.sh).
 5. Smoke-test the built R (`R --version` and a script run).
 
-### In containers (Alma / Rocky / Ubuntu)
+### In containers (AlmaLinux / Rocky)
+
+These are the images the CI workflow uses (the harness also supports Ubuntu, but
+CI is currently scoped to the RHEL family that matches the cluster):
 
 ```bash
-docker run --rm -v "$PWD:/repo" -w /repo almalinux:8   bash test/run_test.sh
-docker run --rm -v "$PWD:/repo" -w /repo rockylinux:8  bash test/run_test.sh
-docker run --rm -v "$PWD:/repo" -w /repo ubuntu:latest bash test/run_test.sh
+docker run --rm -v "$PWD:/repo" -w /repo almalinux:8  bash test/run_test.sh
+docker run --rm -v "$PWD:/repo" -w /repo almalinux:9  bash test/run_test.sh
+docker run --rm -v "$PWD:/repo" -w /repo rockylinux:9 bash test/run_test.sh
 ```
 
 ### Knobs
@@ -121,3 +124,34 @@ SKIP_DEPS=1 ./test/run_test.sh
 - `install_deps.sh` uses `sudo` only when not already root, so it works both in
   containers (root) and on a dev box.
 - Build artifacts go to `test/test_pkg/` and are ignored by git.
+
+---
+
+## Continuous integration
+
+[`.github/workflows/test-install-r.yml`](.github/workflows/test-install-r.yml)
+runs the test harness on GitHub Actions across **AlmaLinux 8, AlmaLinux 9, and
+Rocky 9** (the cluster is alma8; el9 is included to catch differences). Each
+distro runs as a container job and executes `test/run_test.sh` — the same script
+you run locally.
+
+It triggers on:
+
+- **push** to `main` and **pull requests** — but only when a build/test file
+  changes (`install_R.sh`, `config.sh`, `install_bioconductor.R`, `test/**`, or the
+  workflow itself), so unrelated commits don't kick off a ~build.
+- **manual dispatch** (Actions tab → *Test install_R.sh* → *Run workflow*).
+
+### Choosing the R version for a manual run
+
+The manual *Run workflow* form has an **`R version to build`** field:
+
+- Enter a version (e.g. `4.5.2`) to build that release on all three distros.
+- Leave it blank to use the default in [`test/test_config.sh`](test/test_config.sh).
+
+The version must exist on CRAN at
+`https://cran.r-project.org/src/base/R-4/R-<version>.tar.gz`, otherwise the
+download step fails the build. (Push/PR runs always use the test default.)
+
+If a job fails, its build logs (`config.out`, `make.*.output`) are uploaded as a
+workflow artifact for debugging.
