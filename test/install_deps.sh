@@ -16,6 +16,19 @@ SUDO=""
 install_rhel() {
     echo "Detected RHEL-family distro - installing build deps with $1"
     local pm="$1"
+
+    # Several build deps (texinfo, and many -devel packages) live in the
+    # PowerTools (el8) / CRB (el9) repo and in EPEL, which are not enabled by
+    # default in the stock container images. Enable them first.
+    local elver
+    elver="$(. /etc/os-release && echo "${VERSION_ID%%.*}")"
+    $SUDO "$pm" install -y dnf-plugins-core epel-release
+    if [ "$elver" -ge 9 ] 2>/dev/null; then
+        $SUDO "$pm" config-manager --set-enabled crb
+    else
+        $SUDO "$pm" config-manager --set-enabled powertools
+    fi
+
     $SUDO "$pm" install -y \
         gcc gcc-c++ gcc-gfortran make wget which tar gzip pkgconfig texinfo \
         pcre2-devel bzip2-devel xz-devel zlib-devel readline-devel \
