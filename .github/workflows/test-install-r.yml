@@ -58,7 +58,7 @@ jobs:
           fi
 
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Build and smoke-test R
         # On workflow_dispatch this is the r_version input; on push/PR it is empty,
@@ -69,7 +69,7 @@ jobs:
 
       - name: Upload build logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: r-build-logs-${{ strategy.job-index }}
           path: |
