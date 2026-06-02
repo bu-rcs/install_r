@@ -1,0 +1,78 @@
+name: Test install_R.sh
+
+# Builds R from source end-to-end with install_R.sh inside containers for the
+# RHEL-family distros we care about: AlmaLinux 8 (matching the cluster's alma8),
+# plus AlmaLinux 9 and Rocky 9 to catch el9 differences. The test harness
+# (test/run_test.sh) installs its own build deps and JDK per-distro, so each job
+# just prepares checkout and runs it.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'install_R.sh'
+      - 'config.sh'
+      - 'install_bioconductor.R'
+      - 'test/**'
+      - '.github/workflows/test-install-r.yml'
+  pull_request:
+    paths:
+      - 'install_R.sh'
+      - 'config.sh'
+      - 'install_bioconductor.R'
+      - 'test/**'
+      - '.github/workflows/test-install-r.yml'
+  workflow_dispatch:
+    inputs:
+      r_version:
+        description: 'R version to build (e.g. 4.5.2). Leave blank to use the test default.'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  build-r:
+    name: Build R on ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - almalinux:8
+          - almalinux:9
+          - rockylinux:9
+
+    container:
+      image: ${{ matrix.image }}
+
+    steps:
+      - name: Install checkout prerequisites (git, tar)
+        # Minimal RHEL images lack git/tar, which actions/checkout needs.
+        run: |
+          if command -v dnf >/dev/null 2>&1; then
+            dnf install -y git tar
+          elif command -v apt-get >/dev/null 2>&1; then
+            apt-get update && apt-get install -y git tar
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build and smoke-test R
+        # On workflow_dispatch this is the r_version input; on push/PR it is empty,
+        # so test_config.sh falls back to its default VERSION.
+        env:
+          VERSION: ${{ inputs.r_version }}
+        run: bash test/run_test.sh
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r-build-logs-${{ strategy.job-index }}
+          path: |
+            test/test_pkg/r/*/build/*.out
+            test/test_pkg/r/*/build/*.output
+          if-no-files-found: ignore

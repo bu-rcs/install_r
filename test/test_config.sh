@@ -20,8 +20,9 @@ export MAKEFLAGS="-j$(nproc)"
 
 # --- the same variables config.sh defines (minus the module loads) ---
 
-# R version to build/install
-export VERSION="4.4.3"
+# R version to build/install. Honors a VERSION already set in the environment
+# (e.g. from a GitHub Actions workflow_dispatch input); otherwise uses the default.
+export VERSION="${VERSION:-4.4.3}"
 
 # Base directory under which R versions are installed (no trailing slash),
 # pointed into the test sandbox instead of /share/pkg.8/r.
