@@ -17,6 +17,8 @@ set -o pipefail
 # It should be run from within version directory, i.e. /share/pkg.7/r/4.2.3
 # the environment variable must be set, i.e export VERSION="4.2.3"
 
+# Modified: build now runs in build/r_install/ (was build/) so the R-build logs stay
+#           separate from the package-migration logs in build/package_install/
 # Modified: April 30, 2024 - configure step modified - added flexblas option
 # Modified: June 18, 2023 - modified for pkg.8 (alma8), use gcc/12.2.0 (current default gcc version 8.5.0)
 
@@ -66,7 +68,12 @@ tar xzf "$TARBALL" -C $R_SOURCE_DIR --strip-components=1
 
 # configure
 # (build modules - texlive, gcc, flexiblas - are loaded by config.sh)
-cd $BUILD_DIR
+# Build R out-of-tree in an r_install/ subfolder of BUILD_DIR: configure/make write all
+# their artifacts AND step logs (config.out, make*.output) here, keeping BUILD_DIR
+# uncluttered - the separate package-migration step logs to build/package_install/.
+R_BUILD_DIR="$BUILD_DIR/r_install"
+mkdir -p "$R_BUILD_DIR"
+cd "$R_BUILD_DIR"
 
 # Assemble configure options. Base options come from $R_CONFIGURE_OPTS (config.sh);
 # the install prefix is added here.
@@ -164,7 +171,8 @@ echo ""
 echo "================================================================"
 echo "R $VERSION built and installed to: $INSTALL_DIR"
 echo ""
-echo "Next steps (run separately, after confirming R works):"
-echo "  - Install BiocManager + tidyverse:"
-echo "      $INSTALL_DIR/bin/Rscript $R_PKG_BASE/install_bioconductor.R |& tee $BUILD_DIR/install_bioconductor.output"
+echo "Next step (after confirming R works): migrate the package set with"
+echo "install_packages/ - it carries CRAN AND Bioconductor packages (and tidyverse):"
+echo "  - Under the OLD R:  Rscript install_packages/list_packages.R"
+echo "  - Under this R:     Rscript install_packages/install_packages.R online installed_r_packages.txt"
 echo "================================================================"
